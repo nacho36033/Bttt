@@ -1,0 +1,129 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Market research desk</title><style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f2f4f6;--ink:#1d2733;--mute:#5d6b7a;--line:#d3d9df;--card:#fff;--mk:#1d2733;--ag:#2f6b9a;--sy:#b4661d}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141a21;--ink:#e6ebf0;--mute:#93a1b0;--line:#2b3641;--card:#1b232c;--mk:#e6ebf0;--ag:#6fa8d6;--sy:#e39a55}}
+:root[data-theme="dark"]{--bg:#141a21;--ink:#e6ebf0;--mute:#93a1b0;--line:#2b3641;--card:#1b232c;--mk:#e6ebf0;--ag:#6fa8d6;--sy:#e39a55}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,sans-serif;padding:16px;max-width:860px;margin-inline:auto}
+h1{font:600 26px/1.2 Georgia,serif;margin:8px 0}p.n{color:var(--mute);margin:0 0 12px;font-size:13px}
+label{display:block;font-weight:600;margin:10px 0 4px}textarea{width:100%;min-height:90px;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink);font:inherit}
+button{margin:8px 6px 8px 0;padding:10px 16px;border:0;border-radius:6px;background:var(--ink);color:var(--bg);font:600 15px system-ui;cursor:pointer}button.s{background:var(--line);color:var(--ink)}button:disabled{opacity:.5}
+button:focus-visible,summary:focus-visible,textarea:focus-visible{outline:2px solid var(--ag);outline-offset:2px}
+.t{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+.c{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;margin:14px 0}.c h2{font:600 18px/1.3 Georgia,serif;margin:0 0 6px}
+.strip{position:relative;height:34px;margin:14px 6px 22px;border-bottom:2px solid var(--line)}.d{position:absolute;bottom:-5px;width:10px;height:10px;border-radius:50%;background:var(--ag);transform:translateX(-5px)}
+.d.m{width:3px;height:30px;border-radius:0;background:var(--mk);bottom:-2px;transform:none}.d.s{background:var(--sy);width:14px;height:14px;bottom:-7px;transform:translateX(-7px)}
+.key,.k{font-size:12px;color:var(--mute)}.flag{border-left:3px solid var(--sy)}summary{cursor:pointer;font-weight:600;margin-top:8px}li{margin:3px 0}a{color:var(--ag)}
+</style></head><body>
+<h1>Market research desk</h1>
+<p class="n">Research aid only. Estimates are uncertain, can be wrong, and are not wagering advice. This page cannot browse the web: agents use only the evidence you paste below, plus unverified background knowledge that they must label as such. About 12 Claude calls per market, billed to your own Claude usage.</p>
+<label for="in">Markets (one per line)</label>
+<textarea id="in" placeholder="Will X happen by Dec 31? | p=0.42&#10;Will Y win on Sunday? | bid=0.60 ask=0.64"></textarea>
+<div class="k">Type the question itself (links can't be opened here). Price: p= (0-1), bid= and ask=, or odds= (decimal).</div>
+<label for="ev">Evidence pack (shared by all markets above)</label>
+<textarea id="ev" placeholder="Reuters | https://example.com/story | 2026-09-29T14:00Z&#10;Text of the article or stat you want the agents to use.&#10;---&#10;Next item..."></textarea>
+<div class="k">Separate items with a line containing ---. Optional first line: source | url | date.</div>
+<button id="go" onclick="go()">Analyze these markets</button><button id="stop" class="s" onclick="ctl&&ctl.abort()" disabled>Stop</button><span id="log" class="k"></span>
+<div id="out"></div>
+<script>
+let S,ctl;
+const $=s=>document.querySelector(s),esc=s=>String(s??"n/a").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pc=x=>x==null?"n/a":(x*100).toFixed(1)+"%",ok=x=>typeof x==="number"&&x>=0&&x<=1,log=t=>$("#log").textContent=t;
+const L=a=>"<ul>"+(a||[]).map(x=>"<li>"+esc(typeof x=="string"?x:JSON.stringify(x))+"</li>").join("")+"</ul>";
+const store={get(k){try{return JSON.parse(localStorage.getItem(k))}catch{return null}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}}};
+/* ---- probability math ---- */
+const implied=(p,b,a,o)=>b!=null&&a!=null?(b+a)/2:p!=null?p:o?1/o:null;
+const wilson=(k,n,z=1.96)=>{const p=k/n,d=1+z*z/n,c=(p+z*z/(2*n))/d,h=z*Math.sqrt(p*(1-p)/n+z*z/(4*n*n))/d;return[Math.max(0,c-h),Math.min(1,c+h)].map(x=>+x.toFixed(3))};
+const sd=a=>{const m=a.reduce((s,x)=>s+x,0)/a.length;return Math.sqrt(a.reduce((s,x)=>s+(x-m)**2,0)/a.length)};
+const EDGE_PP=8; /* discrepancy flag threshold, percentage points */
+/* ---- agents: add one object here to add an agent; cat limits it to categories ---- */
+const SYS=`You are one specialist in a prediction-market research team. Work alone; you have not seen other agents' work.
+You CANNOT browse. The EVIDENCE PACK is your only source of current information; cite it by id (E1, E2...). Training knowledge may supply base rates or history only as kind "background" (unverified, never live).
+Never invent facts, numbers, odds, sources, URLs or dates. If needed evidence is missing, say so in unknowns. Never guarantee outcomes.
+Claim kinds: fact (must cite an evidence id), background, inference, speculation.
+estimate = your probability the market resolves YES from your own analysis only, or null if you cannot responsibly give one.
+Reply with ONLY JSON: {"estimate":0.0,"confidence":"low|medium|high","claims":[{"text":"","kind":"fact","evidence":"E1"}],"assumptions":[],"unknowns":[],"counts":null}`;
+const AGENTS=[
+{n:"news",r:"NEWS & INFORMATION AGENT. From the evidence pack extract what happened, when, why it may matter, source and your confidence: breaking news, official statements, injuries/roster changes, weather, economic releases, market-moving events. Flag stale items."},
+{n:"historical",r:"HISTORICAL DATA AGENT. Examine previous performances, head-to-head, trends, recent form, home/away splits, historical market behaviour, comparable events. Trends never guarantee outcomes; state how comparable each precedent really is."},
+{n:"statistical",r:'STATISTICAL MODEL AGENT. Build an independent quantitative estimate (historical frequency, recent-form adjustment, distribution, interval) and state every assumption. When you use a frequency set "counts":{"k":successes,"n":trials}; do not present arithmetic you cannot show.'},
+{n:"market",price:1,r:"MARKET ANALYST AGENT. Analyse the market itself: price, implied probability, spread, liquidity, volume, movement, whether it reacts to new information, using only what is supplied. Do not assume the price is right or wrong. If market data is missing, say so."},
+{n:"contrarian",price:1,r:"CONTRARIAN AGENT. Argue the strongest case against the leading interpretation (the market-implied side): overlooked evidence, what would invalidate the thesis, hidden variables, whether the obvious information is already priced in. Your estimate is your honest probability after this adversarial pass."}];
+const VERIFY=`You are the SOURCE VERIFICATION AGENT. You get factual claims only (no conclusions) and the evidence pack. For each claim check the cited item actually says it; look for conflicts with other items.
+status: supported | unsupported | conflicting (say what conflicts in note). tier: 1 official/primary, 2 quality reporting, 3 statistics database, 4 reputable analyst, 5 social media, 6 unverified.
+Reply ONLY JSON: {"results":[{"id":"","status":"","tier":6,"note":""}]}`;
+const DEBATE=`DEBATE ROUND. You see other agents' estimates, assumptions and claims with verification status. Identify agreements, disagreements, weak assumptions and missing information.
+Revise your estimate ONLY if another agent's claim is compelling evidence; cite its id in evidence_claim_id. Otherwise revised_estimate must be null. Do not copy others' numbers.
+Reply ONLY JSON: {"agreements":[],"disagreements":[],"weak_assumptions":[],"missing":[],"revised_estimate":null,"evidence_claim_id":null,"reason":""}`;
+const SYNTH=`You are the FINAL SYNTHESIS AGENT. Inputs: independent estimates (original and post-debate), claims with verification status, debate notes. Do not simply average: weigh evidence quality, keep speculation separate from fact, surface contradictory evidence, never claim certainty.
+Reply ONLY JSON: {"estimate":0.0,"confidence":"Low|Medium|High","data_quality":"High|Medium|Low","key_evidence":["claim id: short text"],"counterarguments":[],"biggest_unknown":"","why":"step-by-step reasoning: what drove the estimate, where agents disagreed, what would change it"}`;
+/* ---- plumbing ---- */
+const call=(p,o={})=>S.json(p,{cache:false,signal:ctl.signal,...o});
+const soft=async(f,d)=>{try{return await f()}catch(e){if(e.code==="cancelled")throw e;return d}};
+async function pool(fns,n=2){const out=[];let i=0;await Promise.all(Array.from({length:n},async()=>{while(i<fns.length){const k=i++;out[k]=await fns[k]()}}));return out}
+function parsePack(t){return t.split(/^\s*---\s*$/m).map(s=>s.trim()).filter(Boolean).map((s,i)=>{const[h,...rest]=s.split("\n"),m=h.split("|").map(x=>x.trim()),hd=m.length>=2&&rest.length;
+ return{id:"E"+(i+1),source:hd?m[0]:"pasted by user",url:hd&&/^https?:/.test(m[1]||"")?m[1]:null,date:hd?(m[2]||"unknown"):"unknown",text:(hd?rest.join("\n"):s).slice(0,3000)}})}
+const packText=p=>p.length?p.map(e=>`[${e.id}] ${e.source} | ${e.date} | ${e.url||"no url"}\n${e.text}`).join("\n\n"):"(empty: no evidence supplied. Say so; use background knowledge only, labelled unverified.)";
+function latest(cs){const t=cs.map(c=>Date.parse(c.published_at)).filter(x=>!isNaN(x));return t.length?new Date(Math.max(...t)).toISOString():"unknown"}
+async function intake(line){const[t,h=""]=line.split("|"),g=k=>{const m=h.match(new RegExp("\\b"+k+"\\s*=\\s*([\\d.]+)"));return m?+m[1]:null};
+ const price=implied(g("p"),g("bid"),g("ask"),g("odds"));
+ const r=await soft(()=>call('Classify this prediction-market question. Reply ONLY JSON {"category":"sports|politics|economics|weather|crypto|elections|finance|geopolitics|other"}\n'+t,{modelTier:"quick"}),{});
+ return{question:t.trim(),category:r.category||"other",price,price_ts:price!=null?new Date().toISOString():null,price_source:price!=null?"user-provided":"unavailable (supply p=, bid=/ask= or odds=)",researched_at:new Date().toISOString()}}
+async function runAgent(a,b,pack){
+ const d={question:b.question,category:b.category,now:b.researched_at};
+ if(a.price)Object.assign(d,{price:b.price,price_source:b.price_source});
+ const r=await soft(()=>call(SYS+"\n\n"+a.r+"\n\nMARKET:\n"+JSON.stringify(d)+"\n\nEVIDENCE PACK:\n"+packText(pack)),{estimate:null,claims:[],unknowns:["agent call failed"]});
+ r.claims=(Array.isArray(r.claims)?r.claims:[]).filter(c=>c&&typeof c==="object").map((c,i)=>{const ev=pack.find(p=>p.id===c.evidence);
+  const kind=c.kind==="fact"&&!ev?"unsourced":c.kind; /* a fact must cite a real evidence item */
+  return{...c,kind,id:a.n+":"+i,source:ev?ev.source:kind==="background"?"model knowledge (unverified)":null,url:ev?ev.url:null,published_at:ev?ev.date:"unknown",tier:6}});
+ r.estimate=ok(r.estimate)?r.estimate:null;
+ const c=r.counts;if(c&&c.n>0&&c.k>=0&&c.k<=c.n)r.ci95=wilson(c.k,c.n);
+ return[a.n,r]}
+async function analyze(line,pack){
+ log("Identifying market");const b=await intake(line);
+ log("Independent research (agents isolated)");
+ const agents=AGENTS.filter(a=>!a.cat||a.cat.includes(b.category));
+ const reps=Object.fromEntries(await pool(agents.map(a=>()=>runAgent(a,b,pack))));
+ const cl=Object.values(reps).flatMap(r=>r.claims),byId=Object.fromEntries(cl.map(c=>[c.id,c]));
+ log("Verifying claims");const facts=cl.filter(c=>c.kind==="fact").slice(0,20);
+ if(facts.length){const v=await soft(()=>call(VERIFY+"\n\nEVIDENCE PACK:\n"+packText(pack)+"\n\nCLAIMS:\n"+JSON.stringify(facts.map(c=>({id:c.id,text:c.text,evidence:c.evidence})))),{});
+  for(const x of(v&&v.results)||[]){const c=byId[x.id];if(c)Object.assign(c,{verification:x.status,note:x.note,tier:x.tier??c.tier})}}
+ log("Debate");const view=skip=>Object.fromEntries(Object.entries(reps).filter(([n])=>n!==skip).map(([n,r])=>[n,{estimate:r.estimate,assumptions:r.assumptions,claims:r.claims.map(({id,text,kind,source,tier,verification,note})=>({id,text,kind,source,tier,verification,note}))}]));
+ const debates=Object.fromEntries(await pool(Object.keys(reps).map(n=>async()=>[n,await soft(()=>call(DEBATE+"\nYour own original estimate: "+reps[n].estimate+"\n\nOTHER AGENTS:\n"+JSON.stringify(view(n))),{})]))),est={},revs=[];
+ for(const[n,d]of Object.entries(debates)){const o=reps[n].estimate,rv=d.revised_estimate,cid=d.evidence_claim_id,c=byId[cid];
+  const acc=ok(rv)&&c&&!String(cid).startsWith(n+":")&&c.verification==="supported"; /* revise only on verified evidence from another agent */
+  est[n]=acc?rv:o;if(rv!=null&&rv!==o)revs.push({agent:n,original:o,revised:rv,reason:d.reason,evidence:cid,accepted:!!acc})}
+ log("Synthesis");const estimates=Object.fromEntries(Object.keys(reps).map(n=>[n,{original:reps[n].estimate,revised:est[n]}]));
+ const claims=cl.map(({id,text,kind,source,url,published_at,tier,verification,note})=>({id,text,kind,source,url,published_at,tier,verification,note}));
+ const s=await soft(()=>call(SYNTH+"\n\nINPUT:\n"+JSON.stringify({estimates,claims,debate:Object.fromEntries(Object.entries(debates).map(([n,d])=>[n,{agreements:d.agreements,disagreements:d.disagreements,weak_assumptions:d.weak_assumptions,missing:d.missing}]))})),{});
+ const se=ok(s.estimate)?s.estimate:null,ip=b.price,diff=se!=null&&ip?+((se-ip)*100).toFixed(1):null,nums=Object.values(est).filter(x=>x!=null);
+ return{...s,market:b.question,price:ip,implied:ip,implied_formula:b.price_source,estimates,synthesis:se,diff_pp:diff,
+  flagged:diff!=null&&Math.abs(diff)>=EDGE_PP&&s.data_quality!=="Low",dispersion_pp:nums.length>1?+(sd(nums)*100).toFixed(1):null,
+  timestamps:{research:b.researched_at,market_price:b.price_ts||"unavailable",latest_info:latest(claims)},claims,revisions:revs,
+  unknowns:Object.fromEntries(Object.entries(reps).map(([n,r])=>[n,r.unknowns])),ci95:Object.fromEntries(Object.entries(reps).filter(([,r])=>r.ci95).map(([n,r])=>[n,r.ci95]))}}
+/* ---- run + render ---- */
+function busy(b){$("#go").disabled=b;$("#stop").disabled=!b}
+async function go(){
+ S=await claude.use("sample");if(!S){log("Open this page inside Claude to run the agents.");return}
+ ctl=new AbortController();busy(true);$("#out").innerHTML="";const res=[];
+ try{const pack=parsePack($("#ev").value);
+  for(const line of $("#in").value.split("\n").map(s=>s.trim()).filter(Boolean)){res.push(await analyze(line,pack));render(res);store.set("pm_last",{i:$("#in").value,e:$("#ev").value,r:res})}
+  log("Done")}catch(e){log(e.code==="cancelled"?"Stopped":"Stopped: "+(e.code||e.message||e))}
+ busy(false)}
+function strip(r){const dots=Object.entries(r.estimates).filter(([,v])=>v.revised!=null).map(([n,v])=>`<i class="d" title="${esc(n)} ${pc(v.revised)}" style="left:${v.revised*100}%"></i>`).join("");
+ return`<div class="strip">${dots}${r.synthesis!=null?`<i class="d s" title="synthesis ${pc(r.synthesis)}" style="left:${r.synthesis*100}%"></i>`:""}${r.price!=null?`<i class="d m" title="market ${pc(r.price)}" style="left:${r.price*100}%"></i>`:""}</div><div class="key">Bar: market price. Blue: agents (post-debate). Amber: synthesis. Scale 0-100%.</div>`}
+function render(rs){if(!rs||!rs.length)return;
+ let h=`<div class="t"><table><tr><th>Market</th><th>Market prob.</th><th>Model prob.</th><th>Difference</th><th>Data quality</th><th>Main uncertainty</th></tr>`+
+ rs.map(r=>`<tr><td>${esc(r.market)}</td><td>${pc(r.implied)}</td><td>${pc(r.synthesis)}</td><td>${r.diff_pp==null?"n/a":(r.diff_pp>0?"+":"")+r.diff_pp+" pp"}</td><td>${esc(r.data_quality)}</td><td>${esc(r.biggest_unknown)}</td></tr>`).join("")+`</table></div>`;
+ h+=rs.map(r=>`<div class="c ${r.flagged?"flag":""}"><h2>${esc(r.market)}</h2>${strip(r)}
+ <p><b>Price</b> ${pc(r.price)} <span class="k">(${esc(r.implied_formula)})</span><br><b>Potential edge</b> ${r.diff_pp==null?"not computed (missing price or model estimate)":`market ${pc(r.implied)} vs model ${pc(r.synthesis)}: ${r.diff_pp>0?"+":""}${r.diff_pp} pp. A model/market discrepancy needing further evaluation; not a prediction or recommendation.`}${r.flagged?" Flagged: above threshold.":""}
+ <br><b>Data quality</b> ${esc(r.data_quality)} &nbsp; <b>Confidence</b> ${esc(r.confidence)} &nbsp; <b>Agent spread</b> ${r.dispersion_pp==null?"n/a":r.dispersion_pp+" pp"}</p>
+ <details open><summary>Agent estimates (original, revised)</summary>${L(Object.entries(r.estimates).map(([n,v])=>n+": "+pc(v.original)+(v.revised!==v.original?" to "+pc(v.revised):"")+(r.ci95[n]?" (freq. interval "+r.ci95[n].map(pc).join(" to ")+")":"")))}${r.revisions.length?"<b>Revisions</b>"+L(r.revisions.map(v=>`${v.agent}: ${pc(v.original)} to ${pc(v.revised)} (${v.accepted?"accepted":"rejected, no verified cross-agent evidence"}) ${v.reason||""}`)):""}</details>
+ <details><summary>Key evidence</summary>${L(r.key_evidence)}</details><details><summary>Counterarguments</summary>${L(r.counterarguments)}</details>
+ <details><summary>Biggest unknown</summary><p>${esc(r.biggest_unknown)}</p></details><details><summary>Why this estimate?</summary><p>${esc(r.why)}</p></details>
+ <details><summary>All claims, sources and timestamps</summary><ul>${r.claims.map(c=>`<li><b>${esc(c.kind)}</b> [tier ${esc(c.tier)}, ${esc(c.verification||"unchecked")}] ${esc(c.text)} <span class="k">${(c.url||"").startsWith("http")?`<a href="${esc(c.url)}" rel="noopener">${esc(c.source)}</a>`:esc(c.source)}, ${esc(c.published_at)}${c.note?" | "+esc(c.note):""}</span></li>`).join("")}</ul></details>
+ <p class="k">Research ${esc(r.timestamps.research)} | Market price ${esc(r.timestamps.market_price)} | Latest info ${esc(r.timestamps.latest_info)}</p></div>`).join("");
+ $("#out").innerHTML=h}
+const last=store.get("pm_last");if(last){$("#in").value=last.i||"";$("#ev").value=last.e||"";render(last.r)}
+</script></body></html>
